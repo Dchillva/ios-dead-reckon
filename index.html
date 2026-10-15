@@ -1,0 +1,146 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>iOS Dead Reckon mk4</title>
+<style>:root{color-scheme:dark}*{box-sizing:border-box}body{font:14px system-ui;background:#0b1220;color:#e5edf8;margin:0;padding:16px}main{max-width:900px;margin:auto}h1{font-size:24px}h2{font-size:17px;margin:0 0 12px}.panel{background:#172235;border:1px solid #334155;border-radius:13px;padding:16px;margin:12px 0}button{background:#38bdf8;color:#06121f;border:0;border-radius:8px;padding:11px 13px;font-weight:700;margin:3px}button:disabled{opacity:.4}canvas{display:block;width:100%;height:175px;background:#0d1728;border-radius:8px}.muted,small{color:#b5c3d6}.values{white-space:pre-wrap;font-variant-numeric:tabular-nums;line-height:1.7}#status{white-space:pre-wrap;color:#bce8ff}progress{width:100%}label{display:inline-block;margin:8px 15px 8px 0}input{accent-color:#38bdf8}.x{color:#fb7185}.y{color:#4ade80}.z{color:#60a5fa}summary{cursor:pointer;font-weight:650}li{margin:8px 0}code{color:#bce8ff}</style></head><body><main>
+<h1>iOS Dead Reckon mk4</h1><p class="muted">Experimental strapdown inertial navigation · calibration · stationary constraints · diagnostics</p>
+<section class="panel"><button id="start">Enable sensors & calibrate</button><button id="pause" disabled>Pause</button><button id="reset">Reset & recalibrate</button><button id="csv">Export CSV</button><p id="status" role="status">Ready. Serve via HTTPS, open in Safari on a physical iPhone, place phone still, then enable.</p><progress id="progress" value="0" max="100"></progress>
+<div id="quality" class="values">Calibration pending</div><div id="sensor" class="values">Motion / orientation / compass: awaiting permission</div></section>
+<section class="panel"><h2>Estimated position (m)</h2><canvas id="pos"></canvas><div id="pv" class="values"></div></section>
+<section class="panel"><h2>Estimated velocity (m/s)</h2><canvas id="vel"></canvas><div id="vv" class="values"></div></section>
+<section class="panel"><h2>Corrected linear acceleration (m/s²)</h2><canvas id="acc"></canvas><div id="av" class="values"></div></section>
+<section class="panel"><h2>Estimated acceleration bias (m/s²)</h2><canvas id="bias"></canvas><div id="bv" class="values"></div></section>
+<p><span class="x">● X</span> &nbsp; <span class="y">● Y</span> &nbsp; <span class="z">● Z</span> &nbsp; <span class="muted">Reference axes fixed at calibration</span></p>
+<section class="panel"><h2>Experimental controls</h2>
+<label>Acceleration deadband <output id="deadValue">0.035</output> m/s² <input id="dead" type="range" min="0" max="0.15" step="0.005" value="0.035"></label>
+<label>Stationary acceleration threshold <output id="athValue">0.12</output> m/s² <input id="ath" type="range" min="0.04" max="0.35" step="0.01" value="0.12"></label>
+<label>Stationary gyro threshold <output id="gthValue">4</output> °/s <input id="gth" type="range" min="1" max="12" step="0.5" value="4"></label>
+<label><input id="compass" type="checkbox"> Apply compass yaw correction when trustworthy</label>
+<label>Motion confirmation <output id="confirmValue">0.16</output> s <input id="confirm" type="range" min="0.04" max="0.5" step="0.02" value="0.16"></label>
+<label><input id="strongGate" type="checkbox" checked> Strong stationary hold (recommended for drift testing)</label>
+<p class="muted">The motion confirmation gate reduces false starts but will miss some brief or gentle movements. Compass correction defaults OFF pending validation of the device's heading convention.</p>
+<p class="muted">These thresholds are heuristics, not physically guaranteed movement classification. Tune while stationary, then compare known movements. Disabling the compass does not disable the browser's own fused orientation.</p></section>
+<section class="panel"><h2>Algorithms and limitations</h2><ol>
+<li><b>Sensor/frame validation.</b> Require finite gravity-removed <code>DeviceMotionEvent.acceleration</code>, gyroscope rotation rates and recent orientation. Never subtract gravity twice. Transform device acceleration using browser orientation <code>R = Rz(α)Rx(β)Ry(γ)</code> and the calibration reference <code>R₀ᵀR</code>. Reject stale orientation and gaps greater than 0.25 s. The browser's fused orientation is used; this app does not estimate attitude from raw gyro integration.</li>
+<li><b>Stationary calibration.</b> Collect at least 50 samples over at least 3 s with low angular speed and low acceleration variability. Estimate initial acceleration bias from the mean transformed acceleration and initial gyro offset from the mean rotation rate. Motion restarts calibration. The resulting gyro bias is used for stationary detection, not to correct the browser's internal attitude solution.</li>
+<li><b>Motion gate with confirmation.</b> Evaluate a 0.4 s rolling RMS window. Motion must persist for a configurable confirmation period, unless it exceeds 1.8× the thresholds. Strong stationary hold suppresses integration before motion is confirmed. Confirmed rest requires 0.35 s of quiet samples. Constant-speed travel can still be mistaken for rest.</li>
+<li><b>ZUPT and ZARU.</b> While confidently stationary or in provisional hold, apply a zero-velocity pseudo-measurement using a diagonal Kalman-style velocity covariance update and hold position. Update gyro bias using a slow EMA (ZARU), and update accelerometer bias only during confirmed stationary periods with small residual acceleration. Neither update recovers previously accumulated position error.</li>
+<li><b>Adaptive acceleration filtering.</b> Low-pass corrected acceleration (0.12 s time constant), apply a small soft deadband, then trapezoidally integrate acceleration to velocity and velocity to position. Filtering reduces jitter but introduces lag and does not remove drift from moving bias.</li>
+<li><b>Compass-assisted yaw.</b> When Safari supplies <code>webkitCompassHeading</code> and <code>webkitCompassAccuracy</code> with plausible accuracy, gradually adjust the reference-frame yaw of the orientation matrix toward the compass heading. Compass is rejected when unavailable or inaccurate. Compass helps heading, not displacement; magnetic interference can worsen results. Compass and orientation conventions vary by platform, so check the stationary rotation diagnostic.</li>
+<li><b>Velocity uncertainty.</b> Propagate a simple diagonal velocity covariance using acceleration noise, then update with <code>v=0</code> when stationary. This is <b>not</b> a full error-state Kalman filter: cross-axis covariance, orientation uncertainty, and position covariance are not modeled.</li>
+<li><b>Barometer.</b> Pressure/altitude data are <b>not available through standard iOS Safari web APIs</b>. No barometric fusion is claimed or simulated. A native Core Motion implementation would be needed for barometric Z correction.</li></ol>
+<p class="muted">This is not reliable indoor positioning. It cannot observe constant velocity, prevent long-term horizontal position drift, or reconstruct the true path without external position/velocity references. The plots are relative estimates, not ground truth.</p>
+<details><summary>iOS troubleshooting and test protocol</summary><ol><li>Use a physical iPhone with Safari on HTTPS. A downloaded file or embedded preview may not expose sensors.</li><li>Tap Enable directly and approve motion/orientation access. If denied, review Safari website permissions or iOS settings and reload.</li><li>Keep phone completely still during calibration. Avoid vibration and moving the phone while calibrating.</li><li>After calibration, leave phone still for 10 seconds: velocity should remain near zero, position approximately constant and ZUPT should engage.</li><li>Rotate the phone in place without translation: large displacement indicates orientation/frame or gravity-compensation problems.</li><li>Move approximately 0.5 m along one axis, stop, then return. Compare residual error; export CSV for debugging.</li><li>If compass reads unavailable, that is expected on some browsers; core navigation still works.</li><li>If sensor samples stop in the background, return to Safari and recalibrate.</li></ol></details></section></main>
+<script>
+'use strict';
+const $=id=>document.getElementById(id),C=['#fb7185','#4ade80','#60a5fa'],norm=a=>Math.hypot(...a),mean=a=>a.reduce((s,x)=>s+x,0)/Math.max(1,a.length),clamp=(x,l,h)=>Math.max(l,Math.min(h,x)),vec=(a,b)=>a.map((x,i)=>x-b[i]),scale=(a,k)=>a.map(x=>x*k),dot=(a,b)=>a.reduce((s,x,i)=>s+x*b[i],0);
+const status=s=>$('status').textContent=s;
+let motionCandidateSince=null,motionGate=false,quietCount=0,rawHistory=[],motionEnergy=0;
+let running=false,ori=null,oriTime=0,compassHeading=null,compassAccuracy=null,calibrated=false,cal=[],calStart=null,origin=null,accBias=[0,0,0],gyroBias=[0,0,0],v=[0,0,0],p=[0,0,0],P=[0.01,0.01,0.01],filt=[0,0,0],prevAcc=null,lastT=null,stillWindow=[],stillSince=null,stationary=false,history=[],logs=[],count=0,lastDraw=0,orientationAge=0;
+function mat(a,b,g){a*=Math.PI/180;b*=Math.PI/180;g*=Math.PI/180;const ca=Math.cos(a),sa=Math.sin(a),cb=Math.cos(b),sb=Math.sin(b),cg=Math.cos(g),sg=Math.sin(g);return [[ca*cg-sa*sb*sg,-sa*cb,ca*sg+sa*sb*cg],[sa*cg+ca*sb*sg,ca*cb,sa*sg-ca*sb*cg],[-cb*sg,sb,cb*cg]];}
+function mul(m,a){return m.map(r=>dot(r,a));}function tmul(m,a){return [0,1,2].map(j=>m.reduce((s,r,i)=>s+r[j]*a[i],0));}
+function rotateZ(m,angle){const c=Math.cos(angle),s=Math.sin(angle);return [m[0].map((x,i)=>c*x-s*m[1][i]),m[0].map((x,i)=>s*x+c*m[1][i]),m[2].slice()];}
+function wrap(a){return Math.atan2(Math.sin(a),Math.cos(a));}
+function reset(){motionCandidateSince=null;motionGate=false;quietCount=0;rawHistory=[];motionEnergy=0;calibrated=false;cal=[];calStart=null;origin=null;accBias=[0,0,0];gyroBias=[0,0,0];v=[0,0,0];p=[0,0,0];P=[.01,.01,.01];filt=[0,0,0];prevAcc=null;lastT=null;stillWindow=[];stillSince=null;stationary=false;history=[];logs=[];count=0;lastDraw=0;$('progress').value=0;status(running?'Hold the phone completely still for calibration.':'Ready. Enable sensors to calibrate.');render();}
+function orientation(e){if([e.alpha,e.beta,e.gamma].every(Number.isFinite)){ori=[e.alpha,e.beta,e.gamma];oriTime=performance.now()/1000;}if(Number.isFinite(e.webkitCompassHeading)&&Number.isFinite(e.webkitCompassAccuracy)){compassHeading=e.webkitCompassHeading;compassAccuracy=e.webkitCompassAccuracy;}}
+function onMotion(e){
+ if(!running)return;
+ const a=e.acceleration,g=e.rotationRate,now=performance.now()/1000;
+ if(!a||![a.x,a.y,a.z].every(Number.isFinite)){status('Missing gravity-compensated acceleration; cannot estimate displacement.');return;}
+ if(!g||![g.alpha,g.beta,g.gamma].every(Number.isFinite)){status('Missing gyroscope rotation rate; cannot calibrate or apply stationary updates.');return;}
+ if(!ori||now-oriTime>0.5){status('Orientation missing or stale; integration suspended.');lastT=null;prevAcc=null;return;}
+ const raw=[a.x,a.y,a.z],gyro=[g.alpha,g.beta,g.gamma],R=mat(...ori);count++;
+ if(!origin)origin=R.map(r=>r.slice());
+ // Compass provides a weak, optional yaw reference. No raw magnetometer data is available.
+ let effectiveR=R,compassUsed=false;
+ if($('compass').checked&&Number.isFinite(compassHeading)&&Number.isFinite(compassAccuracy)&&compassAccuracy>=0&&compassAccuracy<=15){
+  // Browser alpha is an orientation heading; compass heading is clockwise from north.
+  // Apply a small bounded correction to yaw only; avoid large frame discontinuities.
+  const delta=wrap((360-compassHeading-ori[0])*Math.PI/180);
+  if(Math.abs(delta)<0.35){effectiveR=rotateZ(R,clamp(delta*0.025,-0.003,0.003));compassUsed=true;}
+ }
+ const local=tmul(origin,mul(effectiveR,raw)),gm=norm(vec(gyro,gyroBias));
+ $('sensor').textContent='Motion: active · orientation: active · gyro: active\nCompass: '+(compassUsed?'yaw correction active':Number.isFinite(compassHeading)?'reading available, correction rejected/off':'unavailable')+(Number.isFinite(compassAccuracy)?' (accuracy '+compassAccuracy.toFixed(1)+'°)':'')+'\nRaw acceleration: '+raw.map(x=>x.toFixed(3)).join(', ')+' m/s²\nRotation rate: '+gyro.map(x=>x.toFixed(2)).join(', ')+' °/s\nSamples: '+count;
+ if(!calibrated){
+  const moving=gm>6||norm(raw)>0.8;
+  if(moving){cal=[];calStart=null;$('progress').value=0;status('Motion during calibration. Hold phone still for 3 seconds.');return;}
+  if(calStart===null)calStart=now;
+  cal.push({a:local,g:gyro,t:now});
+  // Reject moving calibration by checking variation around the running mean.
+  const avgA=[0,1,2].map(i=>mean(cal.map(s=>s.a[i])));
+  const variability=Math.sqrt(mean(cal.map(s=>norm(vec(s.a,avgA))**2)));
+  if(cal.length>12&&variability>0.13){cal=[];calStart=null;$('progress').value=0;status('Calibration unstable: acceleration variation too high.');return;}
+  const elapsed=now-calStart;$('progress').value=clamp(elapsed/3*100,0,100);
+  if(elapsed>=3&&cal.length>=50){
+   accBias=avgA;gyroBias=[0,1,2].map(i=>mean(cal.map(s=>s.g[i])));calibrated=true;lastT=now;status('Calibration complete. Keep still to verify ZUPT, then try a short movement.');
+  }else status('Calibrating: '+Math.round($('progress').value)+'% · '+cal.length+' samples');
+  $('quality').textContent='Calibration: '+(calibrated?'complete':'collecting')+' · variability '+variability.toFixed(4)+' m/s²';return;
+ }
+ const dt=lastT===null?0:now-lastT;
+ if(dt>0.25||dt<=0){lastT=now;prevAcc=null;filt=[0,0,0];if(dt>0.25)status('Sample gap >250 ms: integration skipped; recalibrate if page was backgrounded.');return;}
+ lastT=now;
+ const residual=vec(local,accBias);
+ // Sliding 0.4 s evidence window. Compute both mean residual and within-window
+ // variability; a single instantaneous acceleration sample must not trigger motion.
+ stillWindow.push({t:now,a:residual,g:gm});while(stillWindow.length&&now-stillWindow[0].t>0.4)stillWindow.shift();
+ const rmsA=Math.sqrt(mean(stillWindow.map(s=>norm(s.a)**2))),rmsG=Math.sqrt(mean(stillWindow.map(s=>s.g*s.g)));
+ const meanA=[0,1,2].map(i=>mean(stillWindow.map(s=>s.a[i])));
+ const noiseA=Math.sqrt(mean(stillWindow.map(s=>norm(vec(s.a,meanA))**2)));
+ const enough=stillWindow.length>=8&&now-stillWindow[0].t>=0.30;
+ const ath=+$('ath').value,gth=+$('gth').value;
+ const quiet=enough&&rmsA<ath&&rmsG<gth;
+ const strongMotion=rmsA>ath*1.8||rmsG>gth*1.8;
+ // Motion requires sustained evidence, except clearly large movements.
+ if(!quiet){if(motionCandidateSince===null)motionCandidateSince=now;}
+ else motionCandidateSince=null;
+ const confirmedMotion=strongMotion||(motionCandidateSince!==null&&now-motionCandidateSince>=+$('confirm').value);
+ if(confirmedMotion)motionGate=true;
+ if(quiet){if(stillSince===null)stillSince=now;}
+ else stillSince=null;
+ const restConfirmed=quiet&&stillSince!==null&&now-stillSince>=0.35;
+ if(restConfirmed)motionGate=false;
+ const strongHold=$('strongGate').checked;
+ const nextStationary=restConfirmed||(strongHold&&!motionGate);
+ // Distinguish confirmed stationary periods from provisional motion suppression.
+ // Only confirmed rest can update bias estimates.
+ if(nextStationary){
+  const measVar=0.000001;
+  for(let i=0;i<3;i++){const K=P[i]/(P[i]+measVar);v[i]*=(1-K);P[i]*=(1-K);}
+  v=[0,0,0];prevAcc=null;filt=[0,0,0];
+  if(restConfirmed){
+   const ka=1-Math.exp(-dt/50),kg=1-Math.exp(-dt/45);
+   // Do not learn a large real acceleration as bias.
+   if(norm(residual)<ath*.65){accBias=accBias.map((x,i)=>x+ka*(local[i]-x));}
+   if(gm<gth*.65){gyroBias=gyroBias.map((x,i)=>x+kg*(gyro[i]-x));}
+  }
+ }else{
+  if(stationary){prevAcc=null;filt=[0,0,0];}
+  const k=1-Math.exp(-dt/0.12);
+  filt=filt.map((x,i)=>x+k*(residual[i]-x));
+  const db=+$('dead').value,corrected=filt.map(x=>Math.sign(x)*Math.max(0,Math.abs(x)-db));
+  const nextV=v.map((x,i)=>x+(prevAcc?(prevAcc[i]+corrected[i])*0.5:corrected[i])*dt);
+  p=p.map((x,i)=>x+(v[i]+nextV[i])*0.5*dt);v=nextV;prevAcc=corrected;
+  P=P.map(x=>x+0.04*dt*dt);
+ }
+ stationary=nextStationary;
+ $('quality').textContent='Calibration: complete · '+(restConfirmed?'CONFIRMED REST — ZUPT + bias learning':nextStationary?'PROVISIONAL HOLD — ZUPT only':'MOTION — integrating')+
+ '\nAccel RMS: '+rmsA.toFixed(4)+' m/s² · gyro RMS: '+rmsG.toFixed(2)+' °/s'+
+ '\nAcceleration variation: '+noiseA.toFixed(4)+' m/s² · gate: '+(motionGate?'OPEN':'CLOSED')+
+ '\nAcceleration bias: '+accBias.map(x=>x.toFixed(4)).join(', ')+
+ '\nGyro bias: '+gyroBias.map(x=>x.toFixed(3)).join(', ')+
+ '\nVelocity σ (approx): '+P.map(x=>Math.sqrt(x).toFixed(4)).join(', ')+' m/s';
+ const record={motionGate,restConfirmed,noiseA,t:now,p:[...p],v:[...v],a:[...filt],bias:[...accBias],gyro:[...gyro],raw:[...raw],rmsA,rmsG,stationary,compassHeading,compassAccuracy,compassUsed};
+ logs.push(record);if(logs.length>30000)logs.shift();
+ if(now-lastDraw>0.08){history.push(record);if(history.length>500)history.shift();lastDraw=now;render();}
+}
+function draw(id,key){const c=$(id),w=c.clientWidth||300,h=c.clientHeight||175,dpr=devicePixelRatio||1;c.width=Math.round(w*dpr);c.height=Math.round(h*dpr);const ctx=c.getContext('2d');ctx.scale(dpr,dpr);ctx.clearRect(0,0,w,h);const data=history.slice(-300),m=Math.max(key==='bias'?.005:.01,...data.flatMap(r=>r[key].map(Math.abs)));ctx.strokeStyle='#43516a';ctx.beginPath();ctx.moveTo(0,h/2);ctx.lineTo(w,h/2);ctx.stroke();ctx.fillStyle='#b5c3d6';ctx.font='11px system-ui';ctx.fillText('±'+m.toFixed(3),8,14);ctx.fillText('0',8,h/2-5);if(data.length<2)return;C.forEach((color,j)=>{ctx.strokeStyle=color;ctx.lineWidth=2;ctx.beginPath();data.forEach((r,i)=>{const x=i/(data.length-1)*w,y=h/2-r[key][j]/m*h*.42;i?ctx.lineTo(x,y):ctx.moveTo(x,y);});ctx.stroke();});}
+function render(){for(const k of ['pos','vel','acc','bias'])draw(k,k==='pos'?'p':k==='vel'?'v':k==='acc'?'a':'bias');for(const [id,a] of [['pv',p],['vv',v],['av',filt],['bv',accBias]])$(id).textContent=['X','Y','Z'].map((s,i)=>s+' '+a[i].toFixed(4)).join('  |  ');}
+$('start').onclick=async()=>{if(!isSecureContext){status('HTTPS required. Host index.html on Netlify or another HTTPS service.');return;}if(!('DeviceMotionEvent'in window)||!('DeviceOrientationEvent'in window)){status('Motion/orientation APIs unavailable. Use Safari on a physical iPhone.');return;}
+ try{for(const K of [DeviceMotionEvent,DeviceOrientationEvent])if(typeof K.requestPermission==='function'&&await K.requestPermission()!=='granted')throw Error('Sensor permission denied.');
+ running=true;reset();window.addEventListener('devicemotion',onMotion);window.addEventListener('deviceorientation',orientation);$('start').disabled=true;$('pause').disabled=false;
+ setTimeout(()=>{if(running&&count===0)status('No motion events. Check HTTPS, Safari permissions, and physical iPhone.');},3000);
+ }catch(err){status('Cannot start: '+err.message);}
+};
+$('pause').onclick=()=>{running=false;window.removeEventListener('devicemotion',onMotion);window.removeEventListener('deviceorientation',orientation);$('start').disabled=false;$('pause').disabled=true;lastT=null;status('Paused. Restart requires recalibration.');};
+$('reset').onclick=reset;
+for(const id of ['dead','ath','gth','confirm'])$(id).oninput=()=>$(id+'Value').textContent=$(id).value;
+$('csv').onclick=()=>{if(!logs.length){status('No calibrated samples to export yet.');return;}const head=['time_s','px_m','py_m','pz_m','vx_mps','vy_mps','vz_mps','ax_filtered','ay_filtered','az_filtered','bias_x','bias_y','bias_z','raw_x','raw_y','raw_z','gyro_alpha','gyro_beta','gyro_gamma','acc_rms','gyro_rms','stationary','compass_heading','compass_accuracy','compass_used','motion_gate','confirmed_rest','acc_variation'];const rows=logs.map(r=>[r.t,...r.p,...r.v,...r.a,...r.bias,...r.raw,...r.gyro,r.rmsA,r.rmsG,Number(r.stationary),r.compassHeading??'',r.compassAccuracy??'',Number(r.compassUsed),Number(r.motionGate),Number(r.restConfirmed),r.noiseA]);const blob=new Blob([[head.join(','),...rows.map(r=>r.join(','))].join('\n')],{type:'text/csv'}),url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download='ios-dead-reckon-mk4-log.csv';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);};
+window.addEventListener('resize',render);render();
+</script></body></html>
